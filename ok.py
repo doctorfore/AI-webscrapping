@@ -1,96 +1,94 @@
-import re
-import urllib.error
-import urllib.request
-
-import xlwt
+import asyncio
+from langchain_openai import ChatOpenAI
+from langchain.chains import create_extraction_chain
 from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
+from util import load_config   # 你需要自建 util.py 并写 load_config
 
+# 读取配置（包括 OpenAI Key）
+config = load_config('config.yml')
+OPENAI_KEY = config['open_ai']['key']
 
-def main():
-    baseurl ="http://jshk.com.cn"
+# -------------------------------
+# 用 Playwright 打开网页并提取纯文本
+# -------------------------------
+async def run_playwright(site):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False)  # 打开浏览器，headless=False 可见
+        # browser = await p.firefox.launch(headless=False) # 也可切换 Firefox
+        page = await browser.new_page()
+        try:
+            await page.goto(site, wait_until='networkidle')  # 等待页面加载完成
+        except TimeoutError:
+            print("Timeout reached during page load, proceeding with available content")
 
-    datelist = getDate(baseurl)
-    savepath=".\\jshk.xls"
-    saveDate(datelist,savepath)
+        # 获取网页源码
+        page_source = await page.content()
 
-    # askURL("http://jshk.com.cn/")
+        # 用 BeautifulSoup 解析 HTML，去掉 script/style
+        soup = BeautifulSoup(page_source, "html.parser")
+        for script in soup(["script", "style"]):
+            script.extract()
 
-findlink = re.compile(r'<a href="(.*?)">')
-findimg = re.compile(r'<img.*src="(.*?)"',re.S)
-findtitle = re.compile(r'<span class="title">(.*)</span')
-findrating = re.compile(r'<span class="rating_num" property="v:average">(.*)</span')
-findjudge = re.compile(r'<span>(\d*)人评价</span>')
-findinq= re.compile(r'<span class="inq">(.*)</span>')
+        text = soup.get_text()
 
-def getDate(baseurl):
-    datalist =[]
-    for i in range(0,10):
-        url=baseurl+str(i*25)
-        html=askURL(url)
-        soup = BeautifulSoup(html,"html.parser")
-        for item in soup.find_all('div',class_="item"):
-            data = []
-            item = str(item)
-            link = re.findall(findlink,item)[0]
-            data.append(link)
-            img=re.findall(findimg,item)[0]
-            data.append(img)
-            title=re.findall(findtitle,item)[0]
+        # 整理成干净的文本行
+        lines = (line.strip() for line in text.splitlines())
+        chunks = (phrase.strip() for line in lines for phrase in line.split(" "))
+        data = '\n'.join(chunk for chunk in chunks if chunk)
 
-            rating=re.findall(findrating,item)[0]
-            data.append(rating)
-            judge=re.findall(findjudge,item)[0]
-            data.append(judge)
-            inq=re.findall(findinq,item)
+        await browser.close()
+        return data
 
-            if len(inq)!=0:
-                inq=inq[0].replace("。","")
-                data.append(inq)
-            else:
-                data.append(" ")
-            print(data)
-            datalist.append(data)
-        print(datalist)
-    return datalist
+# -------------------------------
+# 设置模型
+# -------------------------------
+GPT_4 = 'gpt-4'
+llm = ChatOpenAI(temperature=0, model=GPT_4, openai_api_key=OPENAI_KEY)
 
-def askURL(url):
-    head = { 
-   "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/78.0.3904.97 Safari/537.36"}
-    request=urllib.request.Request(url,headers=head)
-    html=""
-    try:
-        response=urllib.request.urlopen(request)
-        html=response.read().decode("utf-8")
-        # print(html)
-    except urllib.error.URLError as e:
-        if hasattr(e,"code"):
-            print(e.code)
-        if hasattr(e,"reason"):
-            print(e.reason)
+# -------------------------------
+# 主程序：定义 schema，提取结构化信息
+# -------------------------------
+async def main():
+    stock_website_info = {
+        "url": "https://stockanalysis.com/stocks/googl/",
+        "schema": {
+            "properties": {
+                "market_cap": {"type": "string"},
+                "revenue": {"type": "string"},
+                "net_income": {"type": "string"},
+                "shares_out": {"type": "string"},
+                "analyst_forecast_report": {"type": "string"},
+            },
+        }
+    }
 
-    return html
+    bilibili_website_info = {
+        "url": "https://space.bilibili.com/282739748/video",
+        "schema": {
+            "properties": {
+                "title": {"type": "string"},
+                "article_content": {"type": "string"},
+            },
+        }
+    }
 
-def saveDate(datalist,savepath):
-    workbook = xlwt.Workbook(encoding='utf-8')
-    worksheet = workbook.add_sheet('电影',cell_overwrite_ok=True)
-    col =("电影详情","图片","影片","评分","评价数","概况")
-    for i in range(0,5):
-        worksheet.write(0,i,col[i])
-    for i in range(0,250):
-        print("第%d条" %(i+1))
-        data=datalist[i]
-        for j in range(0,5):
-            worksheet.write(i+1,j,data[j])
+    # 可切换不同目标
+    parsing_target = stock_website_info
+    # parsing_target = bilibili_website_info
+    # parsing_target = twitter_website_info
+    # parsing_target = techcruch_website_info
 
-    workbook.save(savepath)
+    # 爬取网页内容
+    output = await run_playwright(parsing_target['url'])
 
+    # 用 LLM 把非结构化文本 -> JSON 结构
+    json_result = create_extraction_chain(parsing_target['schema'], llm).invoke(output)
 
+    print(json_result['text'])
 
-if __name__ == '__main__':
-    main()
-    print("爬取完毕")
-————————————————
-
-                            版权声明：本文为博主原创文章，遵循 CC 4.0 BY-SA 版权协议，转载请附上原文出处链接和本声明。
-                        
-原文链接：https://blog.csdn.net/weixin_44617651/article/details/129703015
+# -------------------------------
+# 程序入口
+# -------------------------------
+if __name__ == "__main__":
+    asyncio.run(main())
