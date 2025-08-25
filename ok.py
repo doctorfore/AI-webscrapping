@@ -32,6 +32,9 @@ async def run_playwright(site):
 
         text = soup.get_text()
 
+        #hi
+
+        
         # 整理成干净的文本行
         lines = (line.strip() for line in text.splitlines())
         chunks = (phrase.strip() for line in lines for phrase in line.split(" "))
